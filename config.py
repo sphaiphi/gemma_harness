@@ -15,6 +15,17 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class EmbeddingConfig:
+    # EmbeddingGemma query tasks. Changing a task affects queries only, so no re-index is needed.
+    code_task: str = "code retrieval"   # repo chunks: Thinker context and edit-target lookup
+    tool_task: str = "search result"    # tool descriptions: FunctionGemma candidate tools
+    batch_size: int = 32
+    max_query_chars: int = 2000
+    max_doc_chars: int = 4000           # EmbeddingGemma context is 2048 tokens; Ollama truncates beyond it
+    timeout_s: float = 60.0
+
+
+@dataclass(frozen=True)
 class GitConfig:
     enabled: bool = True
     baseline_commit: bool = True
@@ -30,6 +41,7 @@ class GitConfig:
 class HarnessConfig:
     host: str = field(default_factory=lambda: os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
     models: ModelConfig = field(default_factory=ModelConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     git: GitConfig = field(default_factory=GitConfig)
 
     # Loop budgets

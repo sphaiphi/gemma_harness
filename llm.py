@@ -1,4 +1,4 @@
-"""Ollama transport. Swap this module to target another backend; callers only use OllamaClient's methods."""
+"""Ollama generation/chat transport. Swap this module to target another backend."""
 from __future__ import annotations
 
 import asyncio
@@ -6,25 +6,10 @@ import contextlib
 from typing import Any, AsyncIterator, Callable
 
 import httpx
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from pydantic import BaseModel, ValidationError
 
 from .common import ModelOutputError
 from .config import HarnessConfig
-
-
-class OllamaEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, model_name: str, host: str):
-        self.model_name = model_name
-        self.host = host
-        self._client = httpx.Client(timeout=60.0)
-
-    def __call__(self, input: Documents) -> Embeddings:
-        if not input:
-            return []
-        r = self._client.post(f"{self.host}/api/embed", json={"model": self.model_name, "input": list(input)})
-        r.raise_for_status()
-        return r.json()["embeddings"]
 
 
 class OllamaClient:
