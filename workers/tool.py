@@ -4,52 +4,39 @@ from __future__ import annotations
 import asyncio
 import json
 
-from ..common import CURRENT_THREAD, ModelOutputError, elide
+from ..common import ModelOutputError, elide
 from ..prompts import TOOL_PROMPT
-from ..schemas import HarnessState, Subgoal, WorkerOutput
-from .base import Worker, WorkResult
+from ..schemas import HarnessState, Subgoal, WorkerOutput, WorkMeta
+from .base import VerifyPolicy, Worker, WorkResult
 
 
 class ToolWorker(Worker):
     kind = "tool"
+    planner_hint = ("exactly one call to an available tool. Never use a tool subgoal to author code; "
+                    "use edit for that.")
+    policy = VerifyPolicy(review="final_only")
     CANDIDATES = 3
     ROUTE_ATTEMPTS = 2
 
     async def run(self, state: HarnessState, sg: Subgoal, attempt: int) -> WorkResult:
-        s = self.s
         try:
             name, args, err = await self._route(sg, state.get("verifier_feedback"))
         except ModelOutputError as e:
             name, args, err = None, {}, str(e)
         if err:
-            return WorkerOutput(subgoal_id=sg.id, status="complete", result=f"NO TOOL RAN: {err}"), {"tool_ok": False}
+            return (WorkerOutput(subgoal_id=sg.id, status="complete", result=f"NO TOOL RAN: {err}"),
+                    WorkMeta(tool_ok=False))
 
-        meta: dict = {"tool": name, "tool_ok": False}
-        if name == "write_file" and args.get("path"):
-            try:
-                p = s.workspace.safe_path(args["path"])
-                meta.update(path=s.workspace.rel(p), original=s.workspace.snapshot(p))
-            except PermissionError:
-                pass
-        async with s.write_lock:
-            ok, output = await asyncio.to_thread(s.tools.execute, name, args)
-        meta["tool_ok"] = ok
-        if ok and "path" in meta:
-            meta["written"] = True
-
-        # Synthesized tools log their writes through tools._sdk; fold them into the rollback set.
-        tid = CURRENT_THREAD.get()
-        sdk = await asyncio.to_thread(s.journal.read_sdk_log, tid) if tid else {}
-        if sdk:
-            files = {meta["path"]: meta.get("original")} if meta.get("written") and meta.get("path") else {}
-            for rel, original in sdk.items():
-                files.setdefault(rel, original)
-            meta = {**meta, "files": files, "written": True}
+        async with self.s.write_lock:
+            res = await asyncio.to_thread(self.s.tools.execute, name, args)
+        # Every workspace write, by a built-in or a synthesized tool, is in the thread's journal.
+        changes = await self.recorded_changes()
 
         shown = ", ".join(f"{k}={str(v)[:80]!r}" for k, v in args.items())
-        return WorkerOutput(subgoal_id=sg.id, status="complete",
-                            result=f"{name}({shown}) -> {'ok' if ok else 'ERROR'}\n{elide(output)}",
-                            reasoning=f"FunctionGemma selected {name}."), meta
+        out = WorkerOutput(subgoal_id=sg.id, status="complete",
+                           result=f"{name}({shown}) -> {'ok' if res.ok else 'ERROR'}\n{elide(res.output)}",
+                           reasoning=f"FunctionGemma selected {name}.")
+        return out, WorkMeta(tool_ok=res.ok, changes=changes, extra={"tool": name})
 
     async def _route(self, sg: Subgoal, feedback: str | None) -> tuple[str | None, dict, str | None]:
         query = f"{sg.description}\n{sg.notes}".strip()

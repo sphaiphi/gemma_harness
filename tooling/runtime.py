@@ -1,4 +1,5 @@
-"""Files installed under <workspace>/tools/ and the subprocess handler that runs a synthesized tool."""
+"""Makes synthesized tools runnable: installs tools/_sdk.py and tools/_runner.py, and registers each tool with a
+handler that runs it in a child process."""
 from __future__ import annotations
 
 import json
@@ -9,6 +10,8 @@ from typing import Any, Callable
 
 from ..common import CURRENT_THREAD, elide
 from ..workspace import Journal, TestRunner
+from .layout import TOOLS_DIR
+from .registry import ToolRegistry, ToolResult
 
 INIT_SOURCE = '"""Synthesized tools. Managed by the Gemma harness."""\n'
 
@@ -106,36 +109,44 @@ RUNNER_BOOTSTRAP = (
 RUNTIME_FILES = {"_sdk.py": SDK_SOURCE, "_runner.py": RUNNER_SOURCE}
 
 
-def install_runtime(root: Path) -> None:
-    d = root / "tools"
-    d.mkdir(exist_ok=True)
-    if not (d / "__init__.py").exists():
-        (d / "__init__.py").write_text(INIT_SOURCE, encoding="utf-8")
-    for fname, src in RUNTIME_FILES.items():
-        p = d / fname
-        if not p.is_file() or p.read_text(encoding="utf-8") != src:
-            p.write_text(src, encoding="utf-8")
+class ToolRuntime:
+    def __init__(self, root: Path, registry: ToolRegistry, tests: TestRunner, journal: Journal, timeout_s: int):
+        self.root = root
+        self.registry = registry
+        self.tests = tests
+        self.journal = journal
+        self.timeout_s = timeout_s
 
+    def install(self) -> None:
+        d = self.root / TOOLS_DIR
+        d.mkdir(exist_ok=True)
+        if not (d / "__init__.py").exists():
+            (d / "__init__.py").write_text(INIT_SOURCE, encoding="utf-8")
+        for fname, src in RUNTIME_FILES.items():
+            p = d / fname
+            if not p.is_file() or p.read_text(encoding="utf-8") != src:
+                p.write_text(src, encoding="utf-8")
 
-def runner_handler(name: str, root: Path, tests: TestRunner, journal: Journal,
-                   timeout_s: int) -> Callable[..., str]:
-    def handler(**kwargs: Any) -> str:
-        env = tests.clean_env(root)
-        if tid := CURRENT_THREAD.get():
-            env["GEMMA_WRITE_LOG"] = str(journal.sdk_log(tid))
-        cmd = [sys.executable, "-I", "-c", RUNNER_BOOTSTRAP, str(root), name]
-        try:
-            p = subprocess.run(cmd, input=json.dumps(kwargs), cwd=root, env=env,
-                               capture_output=True, text=True, timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            return f"Error: tool {name} timed out after {timeout_s}s"
-        lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
-        try:
-            payload = json.loads(lines[-1])
-        except (IndexError, json.JSONDecodeError):
-            return f"Error: tool {name} crashed:\n{elide(p.stderr, 1500)}"
-        if not payload.get("ok"):
-            return f"Error: {payload.get('error')}"
-        r = payload.get("result")
-        return r if isinstance(r, str) else json.dumps(r)
-    return handler
+    def register(self, spec: dict) -> None:
+        self.registry.register(spec["name"], spec["description"], spec["parameters"], self.handler(spec["name"]))
+
+    def handler(self, name: str) -> Callable[..., ToolResult]:
+        def run(**kwargs: Any) -> ToolResult:
+            env = self.tests.clean_env(self.root)
+            if tid := CURRENT_THREAD.get():
+                env["GEMMA_WRITE_LOG"] = str(self.journal.sdk_log(tid))
+            cmd = [sys.executable, "-I", "-c", RUNNER_BOOTSTRAP, str(self.root), name]
+            try:
+                p = subprocess.run(cmd, input=json.dumps(kwargs), cwd=self.root, env=env,
+                                   capture_output=True, text=True, timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                return ToolResult.failure(f"tool {name} timed out after {self.timeout_s}s")
+            lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+            try:
+                payload = json.loads(lines[-1])
+            except (IndexError, json.JSONDecodeError):
+                return ToolResult.failure(f"tool {name} crashed:\n{elide(p.stderr, 1500)}")
+            if not payload.get("ok"):
+                return ToolResult.failure(str(payload.get("error")))
+            return ToolResult.success(payload.get("result"))
+        return run

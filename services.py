@@ -12,7 +12,8 @@ from .embeddings import GemmaEmbedder
 from .git import GitRepo
 from .index import RepoIndex
 from .llm import OllamaClient
-from .tooling import ToolRegistry, ToolSynthesis, register_builtin_tools
+from .tooling import (MutationChecker, ToolAutoloader, ToolRegistry, ToolRuntime, VerifiedStore,
+                      register_builtin_tools)
 from .workspace import Journal, TestRunner, Workspace
 
 
@@ -25,7 +26,10 @@ class Services:
     journal: Journal
     repo: RepoIndex
     tools: ToolRegistry
-    synth: ToolSynthesis
+    runtime: ToolRuntime
+    verified: VerifiedStore
+    autoloader: ToolAutoloader
+    mutation: MutationChecker
     tests: TestRunner
     git: GitRepo
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -47,7 +51,10 @@ class Services:
         tests = TestRunner(root, cfg)
         tools = ToolRegistry(chroma, embedder, task=e.tool_task)
         register_builtin_tools(tools, workspace, tests)
-        synth = ToolSynthesis(root, cfg, tools, tests, journal)
+        runtime = ToolRuntime(root, tools, tests, journal, cfg.synth_tool_timeout_s)
+        verified = VerifiedStore(root / cfg.verified_file)
 
         return cls(cfg=cfg, llm=OllamaClient(cfg), embedder=embedder, workspace=workspace, journal=journal,
-                   repo=repo, tools=tools, synth=synth, tests=tests, git=GitRepo(root, cfg.git))
+                   repo=repo, tools=tools, runtime=runtime, verified=verified,
+                   autoloader=ToolAutoloader(root, tools, runtime, verified, tests),
+                   mutation=MutationChecker(root, tests), tests=tests, git=GitRepo(root, cfg.git))

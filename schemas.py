@@ -1,21 +1,25 @@
-"""Typed contracts between Thinker, Worker, Verifier and the graph state."""
+"""Typed contracts between Thinker, Worker, Verifier and the graph state.
+
+To add a subgoal kind, write a Worker subclass (kind, planner_hint, policy) and register it in
+workers.WORKER_TYPES. Nothing in this module changes.
+"""
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Collection, Literal, Sequence, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
-# To add a subgoal kind: extend this Literal, add a Worker subclass, register it in workers.WORKER_TYPES,
-# and describe the kind in prompts.thinker_prompt().
-SubgoalKind = Literal["edit", "tool", "reason", "synth"]
 TaskType = Literal["coding", "math", "research", "reasoning", "other"]
 Route = Literal["worker", "thinker"]
+
+# Accept-hook trigger set by the synth worker: register the new tool once its subgoal is accepted.
+REGISTER_SYNTH = "register_synth"
 
 
 class Subgoal(BaseModel):
     id: str
     description: str
-    kind: SubgoalKind
+    kind: str  # one of the registered worker kinds; plan_model() constrains it for the Thinker
     suggested_role: Route = "worker"
     depends_on: list[str] = Field(default_factory=list)
     notes: str = ""
@@ -26,6 +30,16 @@ class Plan(BaseModel):
     summary: str
     subgoals: list[Subgoal] = Field(min_length=1)
     revision_of: str | None = None
+
+
+def plan_model(kinds: Sequence[str]) -> type[Plan]:
+    """A Plan schema whose subgoal kinds are limited to `kinds`. Used as the Thinker's structured output."""
+    if not kinds:
+        raise ValueError("at least one subgoal kind is required")
+    kind_type = Literal[tuple(kinds)]  # type: ignore[valid-type]
+    planned_subgoal = create_model("PlannedSubgoal", __base__=Subgoal, kind=(kind_type, ...))
+    return create_model("PlannedPlan", __base__=Plan,
+                        subgoals=(list[planned_subgoal], Field(min_length=1)))
 
 
 class ReasonOutput(BaseModel):
@@ -59,6 +73,33 @@ class Verdict(BaseModel):
     task_complete: bool = False
 
 
+class WorkMeta(BaseModel):
+    """Facts a worker reports to verify and gate. Stored in the checkpoint, so it must stay JSON-serializable."""
+    changes: dict[str, str | None] = Field(default_factory=dict)  # path -> original content; None = new file
+    static_errors: list[str] = Field(default_factory=list)
+    worker_error: str | None = None
+    tool_ok: bool | None = None                                   # None when the subgoal ran no tool
+    on_accept: list[str] = Field(default_factory=list)            # accept-hook triggers, e.g. REGISTER_SYNTH
+    extra: dict[str, Any] = Field(default_factory=dict)           # worker-specific data, e.g. the synth spec
+
+    @classmethod
+    def from_state(cls, raw: dict | None) -> "WorkMeta":
+        """Read worker_meta from graph state, converting the untyped dict saved by earlier versions."""
+        raw = raw or {}
+        if set(raw) <= set(cls.model_fields):
+            return cls.model_validate(raw)
+        changes: dict[str, str | None] = {}
+        if raw.get("written"):
+            if raw.get("files"):
+                changes = dict(raw["files"])
+            elif raw.get("path"):
+                changes = {raw["path"]: raw.get("original")}
+        return cls(changes=changes, static_errors=list(raw.get("static_errors") or []),
+                   worker_error=raw.get("worker_error"), tool_ok=raw.get("tool_ok"),
+                   on_accept=[REGISTER_SYNTH] if raw.get("synth") else [],
+                   extra={k: raw[k] for k in ("synth", "digest", "tool") if k in raw})
+
+
 class HarnessState(TypedDict, total=False):
     raw_spec: str
     structured_ast: str
@@ -90,13 +131,18 @@ def initial_state(raw_spec: str) -> HarnessState:
     )
 
 
-def validate_plan(plan: Plan, accepted: dict, prev: dict[str, dict], max_subgoals: int) -> list[str]:
+def validate_plan(plan: Plan, accepted: dict, prev: dict[str, dict], max_subgoals: int,
+                  kinds: Collection[str] | None = None) -> list[str]:
     errs: list[str] = []
     ids = [s.id for s in plan.subgoals]
     if len(ids) != len(set(ids)):
         errs.append("subgoal ids must be unique")
     if len(ids) > max_subgoals:
         errs.append(f"at most {max_subgoals} subgoals")
+    if kinds is not None:
+        for s in plan.subgoals:
+            if s.kind not in kinds:
+                errs.append(f"{s.id}.kind {s.kind!r} is not one of {sorted(kinds)}")
     seen: set[str] = set()
     for s in plan.subgoals:
         if bad := [d for d in s.depends_on if d not in seen]:

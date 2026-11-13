@@ -1,22 +1,22 @@
 """System prompts. Kept apart from logic so they can be tuned and versioned on their own."""
 from __future__ import annotations
 
+import textwrap
+from typing import Mapping
+
 from .security import ToolLinter
 
 
-def thinker_prompt(max_subgoals: int) -> str:
+def thinker_prompt(max_subgoals: int, kind_hints: Mapping[str, str]) -> str:
+    """Thinker prompt. The subgoal kinds and their descriptions come from the registered workers."""
+    kinds = "\n".join(f"  - {kind}: " + textwrap.indent(hint.strip(), "    ").lstrip()
+                      for kind, hint in kind_hints.items())
     return f"""You are the Thinker in a Thinker/Worker/Verifier pipeline. Decompose the task into the smallest
 ordered list of subgoals (at most {max_subgoals}). You only plan: never solve, write code or verify.
 - Each subgoal must be concrete enough for a Worker to do without questions. Ids are unique: sg1, sg2, ...
 - depends_on may list only ids that appear EARLIER in the list.
 - kind for each subgoal:
-  - edit: change one function, class or small region of ONE Python file, or create one new file.
-    Start the description with the file path, e.g. "In src/math_utils.py: ...".
-  - tool: exactly one call to an available tool. Never use a tool subgoal to author code; use edit for that.
-  - reason: analysis, research or a written answer that needs no tool.
-  - synth: create ONE new reusable tool, only when no available tool fits and the task needs one. Start the
-    description with "Create tool <snake_case_name>:". Follow it with a tool subgoal that calls the new tool.
-- Files under tools/ and tests/test_tool_*.py are managed: change them only with a synth subgoal.
+{kinds}
 - The last subgoal produces the final deliverable. Do not add verification subgoals.
 - For coding tasks the run must end with a passing pytest suite: include a subgoal that writes or updates tests
   unless suitable tests already exist.

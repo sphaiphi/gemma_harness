@@ -1,29 +1,29 @@
 """Built-in tools. To add one, register it here and add its name to BUILTIN_TOOLS."""
 from __future__ import annotations
 
-import json
-
 from ..security import lint
 from ..workspace import TestRunner, Workspace
-from .registry import ToolRegistry
+from .registry import ToolRegistry, ToolResult
 
 BUILTIN_TOOLS = frozenset({"read_file", "write_file", "run_pytest"})
 
 
 def register_builtin_tools(registry: ToolRegistry, ws: Workspace, tests: TestRunner) -> None:
-    def read_file(path: str) -> str:
+    def read_file(path: str) -> ToolResult:
         p = ws.safe_path(path)
-        return p.read_text(encoding="utf-8") if p.is_file() else f"Error: file {path} not found."
+        if not p.is_file():
+            return ToolResult.failure(f"file {path} not found.")
+        return ToolResult.success(p.read_text(encoding="utf-8"))
 
-    def write_file(path: str, content: str) -> str:
+    def write_file(path: str, content: str) -> ToolResult:
         p = ws.safe_path(path)
         if p.suffix == ".py" and (errs := lint(content)):
-            return "Error: blocked by security linter: " + "; ".join(errs)
+            return ToolResult.failure("blocked by security linter: " + "; ".join(errs))
         ws.write(p, content)
-        return f"Wrote {len(content)} chars to {path}"
+        return ToolResult.success(f"Wrote {len(content)} chars to {path}")
 
-    def run_pytest() -> str:
-        return json.dumps(tests.run())
+    def run_pytest() -> ToolResult:
+        return ToolResult.success(tests.run())  # the call succeeded; pass/fail is in the JSON
 
     registry.register("read_file", "Read a workspace file.",
                       {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},

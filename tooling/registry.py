@@ -6,6 +6,7 @@ matched with search queries ("task: search result | query: <subgoal>").
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import jsonschema
@@ -13,6 +14,23 @@ import jsonschema
 from ..common import digest
 from ..embeddings import ASYMMETRIC_TASKS, SEARCH, Doc, GemmaEmbedder, open_collection, require_task
 
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Outcome of one tool call. Success is explicit; it is never inferred from the output text."""
+    ok: bool
+    output: str
+
+    @classmethod
+    def success(cls, value: Any) -> "ToolResult":
+        return cls(True, value if isinstance(value, str) else json.dumps(value, default=str))
+
+    @classmethod
+    def failure(cls, message: str) -> "ToolResult":
+        return cls(False, message if message.startswith("Error") else f"Error: {message}")
+
+
+# A handler returns a ToolResult, or any value (treated as success). Raising an exception means failure.
 Handler = Callable[..., Any]
 
 
@@ -76,12 +94,11 @@ class ToolRegistry:
             return f"invalid arguments for {name}: {e.message}"
         return None
 
-    def execute(self, name: str, args: dict) -> tuple[bool, str]:
+    def execute(self, name: str, args: dict) -> ToolResult:
         if err := self.validate(name, args):
-            return False, f"Error: {err}"
+            return ToolResult.failure(err)
         try:
             out = self._handlers[name](**args)
         except Exception as e:
-            return False, f"Error: {type(e).__name__}: {e}"
-        out = out if isinstance(out, str) else json.dumps(out)
-        return not out.startswith("Error"), out
+            return ToolResult.failure(f"{type(e).__name__}: {e}")
+        return out if isinstance(out, ToolResult) else ToolResult.success(out)

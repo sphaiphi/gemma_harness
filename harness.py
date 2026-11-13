@@ -9,11 +9,11 @@ from typing import Any, Mapping, Sequence
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .config import HarnessConfig
-from .graph import Gate, Nodes, build_graph
+from .graph import Gate, Hook, Nodes, build_graph, default_accept_hooks, default_reject_hooks
 from .schemas import initial_state
 from .services import Services
-from .verification import StaticCheck, Verifier
-from .workers import Worker, build_workers
+from .verification import EvidenceCollector, StaticCheck, Verifier, default_collectors
+from .workers import Worker, build_workers, worker_policies
 
 log = logging.getLogger(__name__)
 
@@ -22,13 +22,21 @@ class GemmaTrinityHarness:
     def __init__(self, workspace_dir: str | Path = ".", config: HarnessConfig | None = None, *,
                  worker_types: Mapping[str, type[Worker]] | None = None,
                  static_checks: Sequence[StaticCheck] | None = None,
+                 collectors: Sequence[EvidenceCollector] | None = None,
+                 accept_hooks: Sequence[Hook] | None = None,
+                 reject_hooks: Sequence[Hook] | None = None,
                  services: Services | None = None):
-        self.cfg = config or HarnessConfig()
+        self.cfg = services.cfg if services else (config or HarnessConfig())
         self.s = services or Services.create(workspace_dir, self.cfg)
         self.workers = build_workers(self.s, worker_types)
+        policies = worker_policies(self.workers)
         self.nodes = Nodes(self.s, self.workers)
-        self.verifier = Verifier(self.s, static_checks)
-        self.gate = Gate(self.s)
+        self.verifier = Verifier(self.cfg, self.s.llm, policies,
+                                 collectors if collectors is not None else default_collectors(self.s),
+                                 static_checks)
+        self.gate = Gate(self.cfg, policies,
+                         accept_hooks if accept_hooks is not None else default_accept_hooks(self.s),
+                         reject_hooks if reject_hooks is not None else default_reject_hooks(self.s))
 
     def build_graph(self, checkpointer: Any):
         return build_graph(self.nodes, self.verifier, self.gate, checkpointer)
@@ -40,8 +48,8 @@ class GemmaTrinityHarness:
             if s.git.enabled:
                 s.git.prepare()
             await self._recover(app, tasks)
-            s.synth.install_runtime()
-            s.synth.autoload()
+            s.runtime.install()
+            s.autoloader.autoload()
             if s.git.enabled:
                 s.git.baseline()
         await asyncio.to_thread(s.repo.index_all)

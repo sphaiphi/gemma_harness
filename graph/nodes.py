@@ -12,8 +12,8 @@ from langgraph.graph import END
 
 from ..common import CURRENT_THREAD, ModelOutputError, elide
 from ..prompts import thinker_prompt
-from ..schemas import HarnessState, Plan, validate_plan
-from ..workers import FALLBACK_KIND, Worker, blocked
+from ..schemas import HarnessState, Plan, plan_model, validate_plan
+from ..workers import FALLBACK_KIND, Worker, blocked, planner_hints
 
 if TYPE_CHECKING:
     from ..services import Services
@@ -23,6 +23,10 @@ class Nodes:
     def __init__(self, services: "Services", workers: dict[str, Worker]):
         self.s = services
         self.workers = workers
+        self.kinds = list(workers)
+        # Built from the registered workers, so a new kind needs no prompt or schema edits.
+        self.plan_schema = plan_model(self.kinds)
+        self.thinker_system = thinker_prompt(services.cfg.max_subgoals, planner_hints(workers))
 
     async def sanitize(self, state: HarnessState) -> dict:
         if state.get("structured_ast"):
@@ -47,9 +51,9 @@ class Nodes:
             parts.append("REVISION prior_context:\n" + elide(json.dumps(prior, indent=1), 8000))
 
         try:
-            plan = await s.llm.chat_json(
-                "orchestrator", thinker_prompt(s.cfg.max_subgoals), "\n\n".join(parts), Plan,
-                check=lambda p: validate_plan(p, accepted, prev, s.cfg.max_subgoals))
+            plan: Plan = await s.llm.chat_json(
+                "orchestrator", self.thinker_system, "\n\n".join(parts), self.plan_schema,
+                check=lambda p: validate_plan(p, accepted, prev, s.cfg.max_subgoals, self.kinds))
         except ModelOutputError as e:
             return {"status": "failed", "failure_reason": f"Thinker failed: {e}", "next_node": END}
 
@@ -68,4 +72,4 @@ class Nodes:
             out, meta = await worker.run(state, sg, attempt)
         except PermissionError as e:
             out, meta = blocked(sg, str(e))
-        return {"worker_output": out.model_dump(), "worker_meta": meta}
+        return {"worker_output": out.model_dump(), "worker_meta": meta.model_dump()}
