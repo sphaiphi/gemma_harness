@@ -127,8 +127,9 @@ class ToolRuntime:
             if not p.is_file() or p.read_text(encoding="utf-8") != src:
                 p.write_text(src, encoding="utf-8")
 
-    def register(self, spec: dict) -> None:
-        self.registry.register(spec["name"], spec["description"], spec["parameters"], self.handler(spec["name"]))
+    def register(self, spec: dict, scope: str) -> None:
+        self.registry.register(spec["name"], spec["description"], spec["parameters"], self.handler(spec["name"]),
+                               scope=scope)
 
     def handler(self, name: str) -> Callable[..., ToolResult]:
         def run(**kwargs: Any) -> ToolResult:

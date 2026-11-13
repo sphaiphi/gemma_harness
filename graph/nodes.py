@@ -1,59 +1,63 @@
 """sanitize, think and work nodes."""
 from __future__ import annotations
 
-import asyncio
-import json
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-import httpx
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 
-from ..common import CURRENT_THREAD, ModelOutputError, elide
+from ..common import CURRENT_THREAD, ModelError, ModelOutputError
+from ..context import ContextBuilder, ContextRequest
 from ..prompts import thinker_prompt
 from ..schemas import HarnessState, Plan, plan_model, validate_plan
-from ..workers import FALLBACK_KIND, Worker, blocked, planner_hints
+from ..scopes import access_rules, kind_scope_errors
+from ..workers import FALLBACK_KIND, Worker, blocked, kind_scopes, planner_hints
 
 if TYPE_CHECKING:
-    from ..services import Services
+    from ..config import HarnessConfig
+    from ..models import JsonReasoner, TextNormalizer
 
 
 class Nodes:
-    def __init__(self, services: "Services", workers: dict[str, Worker]):
-        self.s = services
+    def __init__(self, cfg: "HarnessConfig", workers: dict[str, Worker], normalizer: "TextNormalizer",
+                 planner: "JsonReasoner", planner_context: ContextBuilder):
+        self.cfg = cfg
         self.workers = workers
+        self.normalizer = normalizer
+        self.planner = planner
+        self.context = planner_context
         self.kinds = list(workers)
-        # Built from the registered workers, so a new kind needs no prompt or schema edits.
+        self.kind_scopes = kind_scopes(workers)
+        # Built from the registered workers and config, so a new kind needs no prompt or schema edits.
         self.plan_schema = plan_model(self.kinds)
-        self.thinker_system = thinker_prompt(services.cfg.max_subgoals, planner_hints(workers))
+        self.thinker_system = thinker_prompt(cfg.max_subgoals, planner_hints(workers),
+                                             access_rules(cfg.task_scopes, self.kind_scopes))
 
     async def sanitize(self, state: HarnessState) -> dict:
         if state.get("structured_ast"):
             return {}
         try:
-            text = await self.s.llm.generate("transformer", f"Normalize task description:\n\n{state['raw_spec']}")
-        except (httpx.HTTPError, ModelOutputError):
+            text = await self.normalizer.normalize(state["raw_spec"])
+        except ModelError:
             text = ""
         return {"structured_ast": text.strip() or state["raw_spec"]}
 
+    def _plan_check(self, accepted: dict, prev: dict[str, dict]) -> Callable[[Plan], list[str]]:
+        def check(p: Plan) -> list[str]:
+            return (validate_plan(p, accepted, prev, self.cfg.max_subgoals, self.kinds)
+                    + kind_scope_errors(p, self.kind_scopes, self.cfg.allowed_scopes(p.task_type)))
+        return check
+
     async def think(self, state: HarnessState) -> dict:
-        s = self.s
         prior = state.get("prior_context")
         accepted = prior["accepted_results"] if prior else {}
         prev = {sg["id"]: sg for sg in prior["previous_plan"]["subgoals"]} if prior else {}
 
-        hits = await asyncio.to_thread(s.repo.search, state["raw_spec"], 5)
-        code = "\n".join(f"- {h['path']} lines {h['start']}-{h['end']}:\n{elide(h['text'], 600)}" for h in hits)
-        parts = [f"Task: {state['raw_spec']}", f"Normalized: {state['structured_ast']}",
-                 f"Available tools:\n{s.tools.catalog()}", f"Relevant code:\n{code or '(none)'}"]
-        if prior:
-            parts.append("REVISION prior_context:\n" + elide(json.dumps(prior, indent=1), 8000))
-
+        user = await self.context.build(ContextRequest(state=state))
         try:
-            plan: Plan = await s.llm.chat_json(
-                "orchestrator", self.thinker_system, "\n\n".join(parts), self.plan_schema,
-                check=lambda p: validate_plan(p, accepted, prev, s.cfg.max_subgoals, self.kinds))
+            plan: Plan = await self.planner.ask(self.thinker_system, user, self.plan_schema,
+                                                check=self._plan_check(accepted, prev))
         except ModelOutputError as e:
             return {"status": "failed", "failure_reason": f"Thinker failed: {e}", "next_node": END}
 

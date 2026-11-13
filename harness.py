@@ -10,6 +10,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .config import HarnessConfig
 from .graph import Gate, Hook, Nodes, build_graph, default_accept_hooks, default_reject_hooks
+from .models import PLANNER, VERIFIER
 from .schemas import initial_state
 from .services import Services
 from .verification import EvidenceCollector, StaticCheck, Verifier, default_collectors
@@ -28,10 +29,11 @@ class GemmaTrinityHarness:
                  services: Services | None = None):
         self.cfg = services.cfg if services else (config or HarnessConfig())
         self.s = services or Services.create(workspace_dir, self.cfg)
+        models = self.s.models
         self.workers = build_workers(self.s, worker_types)
         policies = worker_policies(self.workers)
-        self.nodes = Nodes(self.s, self.workers)
-        self.verifier = Verifier(self.cfg, self.s.llm, policies,
+        self.nodes = Nodes(self.cfg, self.workers, models.normalizer(), models.planner(), self.s.contexts[PLANNER])
+        self.verifier = Verifier(self.cfg, models.verifier(), self.s.contexts[VERIFIER], policies,
                                  collectors if collectors is not None else default_collectors(self.s),
                                  static_checks)
         self.gate = Gate(self.cfg, policies,
@@ -44,6 +46,8 @@ class GemmaTrinityHarness:
     # ------------------------------------------------------------- startup
     async def _startup(self, app: Any, tasks: list[dict[str, str]]) -> None:
         s = self.s
+        for role, desc in s.models.describe().items():
+            log.info("[models] %s: %s", role, desc)
         async with s.write_lock:
             if s.git.enabled:
                 s.git.prepare()
@@ -98,7 +102,7 @@ class GemmaTrinityHarness:
 
     async def run_concurrent_workload(self, tasks: list[dict[str, str]]) -> list[Any]:
         db = str(self.s.workspace.root / self.cfg.checkpoint_db)
-        async with self.s.llm.session(), AsyncSqliteSaver.from_conn_string(db) as cp:
+        async with self.s.transport.session(), AsyncSqliteSaver.from_conn_string(db) as cp:
             app = self.build_graph(cp)
             await self._startup(app, tasks)
             return await asyncio.gather(*(self.run_thread(app, t["spec"], t["id"]) for t in tasks),

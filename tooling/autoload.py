@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..common import digest, elide
 from ..workspace import TestRunner
-from .checks import check_tool, read_tool_spec
+from .checks import check_tool, read_tool_spec, tool_scope
 from .layout import TOOLS_DIR, test_rel
 from .registry import ToolRegistry
 from .runtime import ToolRuntime
@@ -52,7 +52,7 @@ class ToolAutoloader:
                     continue
                 note = " (re-verified: source or tests changed)"
             loaded[name] = dg
-            self.runtime.register(spec)
+            self.runtime.register(spec, tool_scope(src))
             log.info("[tools] auto-loaded %s%s", name, note)
         self.store.save(loaded)
         self.registry.prune()

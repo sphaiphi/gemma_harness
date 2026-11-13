@@ -7,16 +7,18 @@ from typing import Mapping
 from .security import ToolLinter
 
 
-def thinker_prompt(max_subgoals: int, kind_hints: Mapping[str, str]) -> str:
-    """Thinker prompt. The subgoal kinds and their descriptions come from the registered workers."""
+def thinker_prompt(max_subgoals: int, kind_hints: Mapping[str, str], access: str) -> str:
+    """Thinker prompt. The kinds and access rules come from the registered workers and the config."""
     kinds = "\n".join(f"  - {kind}: " + textwrap.indent(hint.strip(), "    ").lstrip()
                       for kind, hint in kind_hints.items())
     return f"""You are the Thinker in a Thinker/Worker/Verifier pipeline. Decompose the task into the smallest
 ordered list of subgoals (at most {max_subgoals}). You only plan: never solve, write code or verify.
 - Each subgoal must be concrete enough for a Worker to do without questions. Ids are unique: sg1, sg2, ...
-- depends_on may list only ids that appear EARLIER in the list.
+- depends_on may list only ids that appear EARLIER in the list. List every earlier subgoal whose result this
+  subgoal needs: workers see full results only for those, and one-line summaries of the rest.
 - kind for each subgoal:
 {kinds}
+- {access}
 - The last subgoal produces the final deliverable. Do not add verification subgoals.
 - For coding tasks the run must end with a passing pytest suite: include a subgoal that writes or updates tests
   unless suitable tests already exist.
@@ -25,7 +27,6 @@ ordered list of subgoals (at most {max_subgoals}). You only plan: never solve, w
   start and in the same order. Revise only from the first failing subgoal on. If an accepted result is itself wrong,
   give the changed subgoal a new id (e.g. sg2b). The revised plan must contain at least one new subgoal.
 Return JSON only."""
-
 
 WORKER_PROMPT = """You are the Worker in a Thinker/Worker/Verifier pipeline. Execute exactly one subgoal.
 - Use the accepted results of earlier subgoals as given inputs; do not redo them.

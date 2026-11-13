@@ -1,4 +1,4 @@
-"""Built-in tools. To add one, register it here and add its name to BUILTIN_TOOLS."""
+"""Built-in tools. To add one, register it here with a scope and add its name to BUILTIN_TOOLS."""
 from __future__ import annotations
 
 from ..security import lint
@@ -27,9 +27,10 @@ def register_builtin_tools(registry: ToolRegistry, ws: Workspace, tests: TestRun
 
     registry.register("read_file", "Read a workspace file.",
                       {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-                      read_file)
+                      read_file, scope="read")
     registry.register("write_file", "Write content to a workspace file.",
                       {"type": "object",
                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                       "required": ["path", "content"]}, write_file)
-    registry.register("run_pytest", "Run workspace pytest suite.", {"type": "object", "properties": {}}, run_pytest)
+                       "required": ["path", "content"]}, write_file, scope="write")
+    registry.register("run_pytest", "Run workspace pytest suite.", {"type": "object", "properties": {}},
+                      run_pytest, scope="exec")

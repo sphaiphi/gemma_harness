@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Mapping
 
-from .base import VerifyPolicy, Worker, blocked, failed, worker_context
+from ..scopes import check_scope
+from .base import VerifyPolicy, Worker, blocked, failed
 from .edit import EditWorker
 from .reason import ReasonWorker
 from .synth import SynthWorker
@@ -23,6 +24,9 @@ def build_workers(s: "Services", types: Mapping[str, type[Worker]] | None = None
         raise ValueError(f"a {FALLBACK_KIND!r} worker is required as the fallback")
     if missing := sorted(k for k, w in workers.items() if not getattr(w, "planner_hint", "").strip()):
         raise ValueError(f"workers without a planner_hint: {missing}")
+    for w in workers.values():
+        if w.requires_scope is not None:
+            check_scope(w.requires_scope)
     return workers
 
 
@@ -34,10 +38,14 @@ def planner_hints(workers: Mapping[str, Worker]) -> dict[str, str]:
     return {kind: w.planner_hint for kind, w in workers.items()}
 
 
+def kind_scopes(workers: Mapping[str, Worker]) -> dict[str, str | None]:
+    return {kind: w.requires_scope for kind, w in workers.items()}
+
+
 def policy_for(policies: Mapping[str, VerifyPolicy], kind: str) -> VerifyPolicy:
     return policies.get(kind) or policies[FALLBACK_KIND]
 
 
 __all__ = ["Worker", "VerifyPolicy", "WORKER_TYPES", "FALLBACK_KIND", "build_workers", "worker_policies",
-           "planner_hints", "policy_for", "blocked", "failed", "worker_context",
+           "planner_hints", "kind_scopes", "policy_for", "blocked", "failed",
            "EditWorker", "ToolWorker", "SynthWorker", "ReasonWorker"]

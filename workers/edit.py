@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 class EditWorker(Worker):
     kind = "edit"
+    requires_scope = "write"
     planner_hint = ("change one function, class or small region of ONE Python file, or create one new file.\n"
                     'Start the description with the file path, e.g. "In src/math_utils.py: ...".')
     policy = VerifyPolicy(run_suite=True, final_test_route="worker")
@@ -24,7 +25,8 @@ class EditWorker(Worker):
     def __init__(self, services: "Services", strategies: Sequence[EditStrategy] | None = None):
         super().__init__(services)
         self.locator = TargetLocator(services.workspace, services.repo)
-        self.strategies = list(strategies or (FimStrategy(services), RewriteStrategy(services)))
+        self.strategies = list(strategies or (FimStrategy(services, services.models.fim()),
+                                              RewriteStrategy(services, services.models.json_worker())))
 
     async def run(self, state: HarnessState, sg: Subgoal, attempt: int) -> WorkResult:
         try:

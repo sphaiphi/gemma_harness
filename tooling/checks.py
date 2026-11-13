@@ -151,3 +151,14 @@ def draft_errors(d: ToolDraft) -> list[str]:
     errs += check_tool(d.name, spec_of(d), compose_tool_source(d))
     errs += check_tests(d.name, strip_fences(d.tests), strip_fences(d.code))
     return errs
+
+def tool_scope(src: str) -> str:
+    """Access level of a synthesized tool: "write" if it can call ws_write, otherwise "read"."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return "write"  # unknown: assume the stricter level
+    uses_write = any((isinstance(n, ast.Name) and n.id == "ws_write") or
+                     (isinstance(n, ast.alias) and n.name == "ws_write") for n in ast.walk(tree))
+    return "write" if uses_write else "read"
+

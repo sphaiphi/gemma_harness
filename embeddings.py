@@ -11,23 +11,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
-import httpx
+from .common import ModelOutputError, digest
 
-from .common import digest
+if TYPE_CHECKING:
+    from .models.transport import OllamaTransport
 
 log = logging.getLogger(__name__)
 
 # Bump when the templates below change. It is part of every collection name, so a change forces a re-index.
 PROMPT_FORMAT_VERSION = "1"
 
-# Asymmetric (retrieval) tasks: query prefix on queries, title/text format on documents.
 SEARCH = "search result"
 QUESTION_ANSWERING = "question answering"
 FACT_CHECKING = "fact checking"
 CODE_RETRIEVAL = "code retrieval"
-# Symmetric tasks: the same prefix on every input being compared.
 CLASSIFICATION = "classification"
 CLUSTERING = "clustering"
 SENTENCE_SIMILARITY = "sentence similarity"
@@ -65,16 +64,21 @@ class Doc:
 
 
 class GemmaEmbedder:
-    """Text-only EmbeddingGemma client over Ollama /api/embed."""
+    """Text-only EmbeddingGemma client on the shared transport (same retries and error types as chat models)."""
 
-    def __init__(self, model: str, host: str, *, batch_size: int = 32, max_query_chars: int = 2000,
-                 max_doc_chars: int = 4000, timeout_s: float = 60.0):
+    def __init__(self, model: str, transport: "OllamaTransport", *, lane: str = "embed", engine: str = "",
+                 batch_size: int = 32, max_query_chars: int = 2000, max_doc_chars: int = 4000):
         self.model = model
-        self.host = host
+        self.transport = transport
+        self.lane = lane
+        self.engine_name = engine
         self.batch_size = batch_size
         self.max_query_chars = max_query_chars
         self.max_doc_chars = max_doc_chars
-        self._client = httpx.Client(timeout=timeout_s)
+
+    @property
+    def engine(self) -> str:
+        return self.engine_name or self.model
 
     @property
     def space_id(self) -> str:
@@ -85,12 +89,11 @@ class GemmaEmbedder:
         out: list[Vector] = []
         for i in range(0, len(inputs), self.batch_size):
             batch = inputs[i:i + self.batch_size]
-            r = self._client.post(f"{self.host}/api/embed",
-                                  json={"model": self.model, "input": batch, "truncate": True})
-            r.raise_for_status()
-            vecs = r.json()["embeddings"]
+            data = self.transport.post_sync("/api/embed", {"model": self.model, "input": batch, "truncate": True},
+                                            self.lane)
+            vecs = data.get("embeddings") or []
             if len(vecs) != len(batch):
-                raise RuntimeError(f"embedder returned {len(vecs)} vectors for {len(batch)} inputs")
+                raise ModelOutputError(f"{self.engine} returned {len(vecs)} vectors for {len(batch)} inputs")
             out += vecs
         return out
 
@@ -109,9 +112,6 @@ class GemmaEmbedder:
             return []
         return self._embed([query_prompt(task, t[:self.max_query_chars]) for t in texts])
 
-    def close(self) -> None:
-        self._client.close()
-
 
 def open_collection(chroma: Any, base: str, embedder: GemmaEmbedder) -> Any:
     """Open `<base>-<space_id>`, dropping collections of the same base built in another vector space."""
@@ -121,5 +121,4 @@ def open_collection(chroma: Any, base: str, embedder: GemmaEmbedder) -> Any:
         if cname != name and (cname == base or cname.startswith(f"{base}-")):
             chroma.delete_collection(cname)
             log.info("[index] dropped %s: built with a different model or embedding prompt format", cname)
-    # Vectors are computed here, never by Chroma, so the collection has no embedding function.
     return chroma.get_or_create_collection(name, embedding_function=None, metadata={"hnsw:space": "cosine"})

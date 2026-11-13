@@ -1,18 +1,18 @@
 """Two-tier verification.
 
 Tier 1: pluggable static checks, then evidence collectors chosen by the worker's VerifyPolicy. Any problem sends
-the subgoal back to the worker without an LLM call.
-Tier 2: the Gemma 3 12B judge, unless the policy says to review this kind only on the final subgoal.
+the subgoal back to the worker without a model call.
+Tier 2: the `verifier` role model, unless the policy says to review this kind only on the final subgoal.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, ClassVar, Mapping, Sequence
 
 from .common import ModelOutputError, elide
+from .context import ContextBuilder, ContextRequest
 from .prompts import VERIFIER_PROMPT
 from .schemas import HarnessState, Plan, Subgoal, Verdict, WorkerOutput, WorkMeta
 from .tooling.layout import test_rel
@@ -21,7 +21,7 @@ from .workers.base import VerifyPolicy
 
 if TYPE_CHECKING:
     from .config import HarnessConfig
-    from .llm import OllamaClient
+    from .models import JsonReasoner
     from .services import Services
     from .tooling import MutationChecker
     from .workspace import TestRunner
@@ -41,7 +41,6 @@ class VerifyInput:
     tests_required: bool
 
 
-# A static check returns error strings. Any error rejects the subgoal back to the worker.
 StaticCheck = Callable[[VerifyInput], list[str]]
 
 
@@ -129,34 +128,13 @@ def default_collectors(s: "Services") -> list[EvidenceCollector]:
     return [SynthToolChecks(s.tests, s.mutation, s.write_lock), FullSuite(s.tests, s.write_lock)]
 
 
-def build_verifier_context(vi: VerifyInput, sections: Sequence[str]) -> str:
-    sg, plan, state = vi.sg, vi.plan, vi.state
-    parts = [f"Subgoal {sg.id} ({sg.kind}): {sg.description}"]
-    if sg.notes:
-        parts.append(f"Planner notes: {sg.notes}")
-    parts.append("Worker output:\n" + elide(json.dumps(vi.wo.model_dump(), indent=1), 6000))
-    parts += sections
-    if not vi.tests_required:
-        parts.append(f"No tests are required for this task type ({plan.task_type}); "
-                     "judge the result on its content.")
-    if vi.is_final:
-        results = {**state["accepted"], sg.id: vi.wo.result}
-        rows = []
-        for s in plan.subgoals:
-            r = results.get(s.id)
-            shown = elide(str(r), 500) if r is not None else "MISSING"
-            rows.append(f"- {s.id} ({s.kind}): {s.description}\n  result: {shown}")
-        parts.append("FINAL SUBGOAL check. Confirm every subgoal below has a result and that together they "
-                     f"answer the query.\nQuery:\n{state['raw_spec']}\n\nAll subgoals and results:\n" +
-                     "\n".join(rows))
-    return "\n\n".join(parts)
-
-
 class Verifier:
-    def __init__(self, cfg: "HarnessConfig", llm: "OllamaClient", policies: Mapping[str, VerifyPolicy],
-                 collectors: Sequence[EvidenceCollector], static_checks: Sequence[StaticCheck] | None = None):
+    def __init__(self, cfg: "HarnessConfig", reasoner: "JsonReasoner", context: ContextBuilder,
+                 policies: Mapping[str, VerifyPolicy], collectors: Sequence[EvidenceCollector],
+                 static_checks: Sequence[StaticCheck] | None = None):
         self.cfg = cfg
-        self.llm = llm
+        self.reasoner = reasoner
+        self.context = context
         self.policies = dict(policies)
         self.collectors = {c.name: c for c in collectors}
         self.static_checks = tuple(static_checks if static_checks is not None else DEFAULT_STATIC_CHECKS)
@@ -187,7 +165,7 @@ class Verifier:
         def verdict(v: str, diagnosis: str | None = None, route_to: str | None = None) -> dict:
             return Verdict(subgoal_id=vi.sg.id, verdict=v, diagnosis=diagnosis, route_to=route_to).model_dump()
 
-        # Tier 1: no LLM.
+        # Tier 1: no model call.
         if vi.wo.status == "blocked":
             return {"verdict": verdict("revise", f"Worker blocked: {vi.wo.blocked_reason}", "thinker"),
                     "evidence": {}}
@@ -211,10 +189,11 @@ class Verifier:
         if vi.policy.review == "final_only" and not vi.is_final:
             return {**out, "verdict": verdict("accept")}
 
-        # Tier 2: Gemma 3 12B judgment.
+        # Tier 2: verifier role model.
         try:
-            v = await self.llm.chat_json("orchestrator", VERIFIER_PROMPT, build_verifier_context(vi, sections),
-                                         Verdict)
+            user = await self.context.build(ContextRequest(state=vi.state, sg=vi.sg,
+                                                           extra={"vi": vi, "sections": sections}))
+            v = await self.reasoner.ask(VERIFIER_PROMPT, user, Verdict)
         except ModelOutputError as e:
             return {**out, "verdict": verdict("revise", f"Verifier error: {e}", "worker")}
         return {**out, "verdict": v.model_dump()}

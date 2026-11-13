@@ -15,35 +15,14 @@ OUTPUT_CAP = 4000
 CURRENT_THREAD: contextvars.ContextVar[str | None] = contextvars.ContextVar("gemma_thread", default=None)
 
 
-class ModelOutputError(Exception):
-    """A model did not return usable output after its repair attempt."""
+class ModelError(Exception):
+    """Base class for model-layer failures. Adapters raise only its subclasses."""
 
 
-def elide(text: str, cap: int = OUTPUT_CAP) -> str:
-    if len(text) <= cap:
-        return text
-    head = cap // 4
-    return f"{text[:head]}\n[... {len(text) - cap} chars omitted ...]\n{text[-(cap - head):]}"
+class ModelOutputError(ModelError):
+    """The model answered, but not usably: bad JSON, empty output, or a 4xx such as an unknown model."""
 
 
-def make_diff(rel: str, before: str | None, after: str) -> str:
-    diff = difflib.unified_diff((before or "").splitlines(True), after.splitlines(True), f"a/{rel}", f"b/{rel}")
-    return "".join(diff) or "(no change)"
+class ModelUnavailable(ModelError):
+    """The model server could not be reached, or kept returning 5xx, after all retries."""
 
-
-def strip_fences(code: str) -> str:
-    m = re.match(r"^\s*```[\w-]*\n(.*?)\n?```\s*$", code, re.S)
-    return m.group(1) if m else code
-
-
-def iter_py_files(root: Path, skip_dirs: Iterable[str]) -> Iterator[Path]:
-    skip = set(skip_dirs)
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
-        for f in filenames:
-            if f.endswith(".py"):
-                yield Path(dirpath) / f
-
-
-def digest(*parts: str) -> str:
-    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:16]

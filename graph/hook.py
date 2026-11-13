@@ -41,7 +41,7 @@ class RegisterSynthTool(Hook):
             return
         spec = ctx.meta.extra["synth"]
         async with self.lock:
-            await asyncio.to_thread(self.runtime.register, spec)
+            await asyncio.to_thread(self.runtime.register, spec, ctx.meta.extra.get("scope", "write"))
             await asyncio.to_thread(self.store.mark, spec["name"], ctx.meta.extra["digest"])
 
 
